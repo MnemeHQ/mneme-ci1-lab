@@ -19,7 +19,9 @@ integrity (the approved wheel sha256) and full CI1.2 fixture parity. See the
 - the trusted merge gate (`pull_request_target`) workflow
 - adversarial PRs or the V0–V13 merge-blocking experiment
 
-Each needs its own approval under charter §9.
+Each needs its own approval under charter §9. The trusted gate and the
+proposed protection rules are described in [`GATE.md`](GATE.md). The ruleset
+there is a spec only, until approved.
 
 Workflows run only on manual dispatch and with read-only permissions. They
 never execute pull-request code.
