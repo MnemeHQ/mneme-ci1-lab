@@ -15,18 +15,7 @@
       ],
       "constraints": [],
       "anti_patterns": [],
-      "rules": [
-        {
-          "type": "FORBID_LITERAL",
-          "value": "install legacy-client",
-          "include_paths": [
-            "docs/**"
-          ],
-          "exclude_paths": [
-            "docs/history/**"
-          ]
-        }
-      ],
+      "rules": [],
       "test_evidence": [],
       "created_at": "2026-10-17",
       "updated_at": "2026-10-17",
@@ -141,27 +130,6 @@
         "created_at": "2026-10-17"
       }
     ],
-    "rules": [
-      {
-        "rule_id": "ADR-901:FORBID_LITERAL:1eff1b82c5be57bd80379f967b799f7b",
-        "decision_id": "ADR-901",
-        "decision_version_id": "dver-d3d431ff6d5edba8b555a040a7b85f9b",
-        "decision_version": "1",
-        "sequence": 0,
-        "rule_type": "FORBID_LITERAL",
-        "rule_payload": {
-          "value": "install legacy-client"
-        },
-        "applicability": {
-          "include_paths": [
-            "docs/**"
-          ],
-          "exclude_paths": [
-            "docs/history/**"
-          ]
-        },
-        "binding_authority": "version"
-      }
-    ]
+    "rules": []
   }
 }
