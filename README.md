@@ -19,14 +19,14 @@ Approved so far under the
   `25313704`, so `CI1 trusted gate` is a required check on `main`.
 - **V0, V1 and the reporting regression test** (run; evidence on
   MnemeHQ/mneme#540).
+- **The Actions event-policy exception** for the gate only
+  (`policy/actions-policy-gate-event.proposed.json`), applied unchanged as
+  repository Actions policy `7806`, so `pull_request_target` stays allowed
+  for `ci1-trusted-gate.yml` if GitHub enforces its default block.
 
 **Not authorized here yet:**
 
 - V2–V13 (adversarial PRs beyond V1)
-- the Actions event-policy exception for the gate
-  (`policy/actions-policy-gate-event.proposed.json`, a spec only; see
-  [`GATE.md`](GATE.md)). GitHub may block `pull_request_target` here by
-  default from 2026-11-02
 
 Each needs its own approval under charter §9.
 
