@@ -17,7 +17,10 @@ section 3 (T1 design details).
    later follows.
 4. Refuse, and record as UNEVALUATED, any path that is not a regular blob,
    is absolute, contains ``..`` or a backslash, sits under ``.mneme/``, or
-   collides with an entry the gate already wrote.
+   collides with an entry the gate already wrote. Adding, modifying **or
+   deleting** anything under ``.mneme/`` is refused, so a PR cannot remove or
+   replace the trusted policy that later PRs are judged against. Other
+   deletions are not evaluated.
 5. Run the pinned evaluator on every materialized file (strict mode,
    ``--json``, a fixed query) and classify each result. Exit codes are never
    read alone: the payload must be coherent with the exit code and the
@@ -90,6 +93,11 @@ def changed_entries(repo: Path, base_sha: str, head_sha: str) -> tuple[str, list
 
 # ── trusted workspace ────────────────────────────────────────────────────────
 
+def is_policy_path(path: str) -> bool:
+    """True for anything under the trusted policy directory ``.mneme/``."""
+    return path == ".mneme" or path.startswith(".mneme/")
+
+
 def refusal_reason(path: str, mode: str) -> str | None:
     if mode not in REGULAR_MODES:
         kind = {"120000": "symlink", "160000": "submodule"}.get(mode, f"mode {mode}")
@@ -142,7 +150,14 @@ def build_workspace(repo: Path, base_sha: str, head_sha: str, ws: Path) -> dict[
     materialized, refused, skipped = [], [], []
     for e in entries:
         if e["status"] == "D":
-            skipped.append({"path": e["path"], "reason": "deleted"})
+            # Deleting the trusted policy is a policy change, not a file that
+            # needs no evaluation: it is refused (and so blocks) even when it
+            # is the PR's only change. Other deletions are not evaluated.
+            if is_policy_path(e["path"]):
+                refused.append({"path": e["path"], "mode": e["mode"],
+                                "reason": "policy path deleted: the PR would remove the trusted decision memory"})
+            else:
+                skipped.append({"path": e["path"], "reason": "deleted"})
             continue
         reason = refusal_reason(e["path"], e["mode"])
         if reason is None:

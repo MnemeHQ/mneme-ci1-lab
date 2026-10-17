@@ -40,7 +40,8 @@ Tracker: [MnemeHQ/mneme#540](https://github.com/MnemeHQ/mneme/issues/540).
 5. **Refused, and therefore blocking:**
    - symlinks (`120000`) and submodules (`160000`)
    - absolute paths, `..`, `.`, empty components or backslashes
-   - anything under `.mneme/`
+   - anything under `.mneme/` that the PR adds or modifies
+   - **any deletion under `.mneme/`**, even when it is the PR's only change. Without this, a deletion-only PR would have nothing to evaluate, would pass, and could remove the trusted memory every later PR is judged against. Other deletions are not evaluated
    - collisions with an entry the gate already wrote
 6. Each materialized file is checked with the pinned evaluator:
    - command: `python -I -m mneme.cli check --mode strict --json`
@@ -76,7 +77,8 @@ gh api -X POST repos/MnemeHQ/mneme-ci1-lab/rulesets --input policy/ruleset-main.
 | V0 | compliant `docs/` change | VERIFIED_PASS | merge allowed |
 | V1 | literal in `docs/` | VIOLATION | blocked |
 | V2 | V1, plus the rule removed from the PR's memory | memory comes from base; the `.mneme/` path is refused | blocked |
-| V3 | V1, plus the PR's memory deleted | memory comes from base | blocked |
+| V3 | V1, plus the PR's memory deleted | memory comes from base; the deletion is refused | blocked |
+| V3a | the PR **only** deletes `.mneme/project_memory.json` | the deletion is refused (regression test `test_deletion_only_pr_removing_the_trusted_memory_cannot_pass`) | blocked |
 | V4 | V1, plus evaluator or packaging edits | the evaluator is the pinned wheel; PR code never executes | blocked |
 | V5 | V1, plus gate workflow or `gate/` edits | `pull_request_target` runs the base copies | blocked |
 | V6 | V1, plus an added permissive `pull_request` workflow | the trusted gate still fails | blocked |
@@ -87,6 +89,14 @@ gh api -X POST repos/MnemeHQ/mneme-ci1-lab/rulesets --input policy/ruleset-main.
 | V11 | green, then base gains a stricter rule | strict status policy is off | **measured**: may merge on a stale base |
 | V12 | requested-mode mismatch | `mode` must equal `strict` | blocked (unit-tested; live only on a lab branch) |
 | V13 | symlink at `.mneme` or under `docs/`, or traversal | refused, never followed | blocked; git/GitHub input rejections recorded separately |
+
+## Limits this experiment does not remove
+
+These stay explicit in the CI1.4 evidence. They are not guarantees.
+
+- **Check ownership and revision.** Whether GitHub enforces the genuine `pull_request_target` result for the correct PR head, and rejects a look-alike check, is measured by V0, V1, V7 and V10. It is not assumed.
+- **Staged changes across separate PRs.** The matrix tests a PR that tries to change the gate **and** violate policy at once (V5, V6). It does not prove protection against two separate PRs, where a first, compliant PR weakens `gate/` or the workflow and merges, and a second PR then introduces a violation. A gate-weakening PR contains no policy violation, so this gate passes it. Protecting the gate definition itself needs a control outside the gate (for example review of `.github/workflows/**` and `gate/**`, or T4). That is out of scope here.
+- **Partial mirror of production rules.** The lab ruleset copies the two `MnemeHQ/mneme` `main-pr-only` settings that matter for this measurement: 0 approvals and the non-strict status policy. It does not replicate every production rule.
 
 ## Open questions the live experiment must answer (not assumed here)
 

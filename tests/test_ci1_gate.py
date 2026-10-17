@@ -86,7 +86,50 @@ def test_pr_edit_or_deletion_of_memory_never_reaches_the_workspace(repo, tmp_pat
     head2 = _commit(r, "delete policy")
     out2 = gate.build_workspace(r, base, head2, tmp_path / "ws2")
     assert (tmp_path / "ws2/.mneme/project_memory.json").read_bytes() == TRUSTED_MEMORY
-    assert {"path": ".mneme/project_memory.json", "reason": "deleted"} in out2["skipped"]
+    refused = {x["path"]: x["reason"] for x in out2["refused"]}
+    assert "policy path deleted" in refused[".mneme/project_memory.json"]
+    assert out2["skipped"] == []
+
+
+def _run_gate(r, base, head, tmp_path):
+    report = tmp_path / "report.json"
+    code = gate.main(["--repo", str(r), "--base-sha", base, "--head-sha", head,
+                      "--workspace", str(tmp_path / "ws"), "--venv-python", sys.executable,
+                      "--empty-dir", str(tmp_path / "empty"), "--report", str(report)])
+    return code, json.loads(report.read_text(encoding="utf-8"))
+
+
+def test_deletion_only_pr_removing_the_trusted_memory_cannot_pass(repo, tmp_path):
+    """Regression: a PR whose only change deletes .mneme/project_memory.json
+    must block. It has no file to evaluate, so it would otherwise pass and
+    could remove the policy every later PR is judged against."""
+    r, base = repo
+    _git(r, "rm", "-q", ".mneme/project_memory.json")
+    head = _commit(r, "delete trusted memory only")
+    code, out = _run_gate(r, base, head, tmp_path)
+    assert code == 1 and out["passed"] is False and out["verdict"] == "BLOCK"
+    assert out["results"] == []  # nothing was evaluated, and it still blocks
+    assert any("policy path deleted" in p for p in out["problems"])
+
+
+def test_deleting_the_whole_policy_directory_cannot_pass(repo, tmp_path):
+    r, base = repo
+    _write(r, ".mneme/extra.json", b"{}\n")
+    base2 = _commit(r, "second policy file on base")
+    _git(r, "rm", "-q", "-r", ".mneme")
+    head = _commit(r, "delete .mneme/")
+    code, out = _run_gate(r, base2, head, tmp_path)
+    assert code == 1
+    assert {x["path"] for x in out["workspace"]["refused"]} == {".mneme/project_memory.json", ".mneme/extra.json"}
+
+
+def test_ordinary_deletions_are_not_evaluated_and_do_not_block(repo, tmp_path):
+    r, base = repo
+    _git(r, "rm", "-q", "README.md")
+    head = _commit(r, "delete readme")
+    code, out = _run_gate(r, base, head, tmp_path)
+    assert code == 0 and out["passed"] is True
+    assert out["workspace"]["skipped"] == [{"path": "README.md", "reason": "deleted"}]
 
 
 @pytest.mark.parametrize("rel,mode,needle", [
