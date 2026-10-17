@@ -1,10 +1,11 @@
 # CI1.3 trusted merge gate and lab protection rules (proposal)
 
-**Status: PROPOSED for review.** Nothing in this document is applied or running.
+**Status.** This document arrives with this repository's PR #2.
 
-- The gate workflow cannot run from a PR branch, because `pull_request_target` always uses the base branch's copy.
-- The ruleset in `policy/ruleset-main.proposed.json` is a spec only.
-- The V0–V13 experiment is not authorized.
+- **Before PR #2 merges,** nothing here runs. `pull_request_target` always uses the base branch's copy of the workflow, and `main` has none.
+- **Once PR #2 merges, the gate runs on every PR to `main`** and reports the `CI1 trusted gate` check. It is **advisory**: no ruleset is applied, so a red gate does not block a merge.
+- **The ruleset** in `policy/ruleset-main.proposed.json` is a spec only. Applying it, which is what makes the gate blocking, is a separate approval (charter §9 item 3).
+- **The V0–V13 experiment** is not authorized.
 
 Charter: MnemeHQ/mneme
 [`docs/plans/2026-10-17-ci1-3-isolated-merge-blocking-experiment-charter.md`](https://github.com/MnemeHQ/mneme/blob/main/docs/plans/2026-10-17-ci1-3-isolated-merge-blocking-experiment-charter.md).
@@ -104,9 +105,9 @@ These stay explicit in the CI1.4 evidence. They are not guarantees.
 - **V7.** Whether a same-name check from the same app can satisfy the requirement while the real gate fails.
 - **V11.** Base freshness with `strict_required_status_checks_policy: false`.
 
-## What merging this PR would mean
+## What merging PR #2 means
 
-Merging puts the gate on `main`, so **it would start running on later PRs**. Without the ruleset it is advisory: a red gate does not block a merge.
+Merging puts the gate on `main`, so **it runs on every later PR**. Until the ruleset is approved and applied, it is advisory: a red gate does not block a merge, and its runs are not V0–V13 evidence.
 
 Merging therefore needs its own explicit approval of this design. Applying the ruleset and running V0–V13 remain separate approvals.
 
