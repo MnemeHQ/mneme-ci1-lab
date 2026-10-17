@@ -11,9 +11,11 @@ name: CI1.3 P2 evaluator preflight
 #   so no PR-controlled code ever runs here.
 # - MnemeHQ/mneme is checked out at a pinned commit, without credentials.
 #
-# Fails closed when the built wheel's sha256 is not the approved value, when
-# the evaluator or harness commit is not the pinned one, or when any parity
-# section is short.
+# Fails closed unless exactly one wheel was built and preserved, the preserved
+# file's own sha256 (hashed here, not taken from the harness) is the approved
+# value and matches the harness report, the evaluator and harness commits are
+# the pinned ones, every parity section is complete, and the reports exist.
+# Artifact upload errors if nothing was preserved.
 
 on:
   workflow_dispatch:
@@ -106,26 +108,61 @@ jobs:
             --json-out "$out/preflight.json" --record-out "$out/preflight.md"
           code=$?
           echo "exit=$code" >> "$GITHUB_OUTPUT"
-          cp "$RUNNER_TEMP"/p2-work/built/*.whl "$out/" 2>/dev/null || true
-          (cd "$out" && sha256sum ./*.whl > wheel.sha256 2>/dev/null) || true
           echo "harness exit code: $code"
+          # Preserve the built wheel itself. The enforcement step requires
+          # exactly one wheel here and hashes this copy independently; it
+          # does not trust the hash the harness reports.
+          shopt -s nullglob
+          wheels=("$RUNNER_TEMP"/p2-work/built/*.whl)
+          echo "wheel_count=${#wheels[@]}" >> "$GITHUB_OUTPUT"
+          if [ "${#wheels[@]}" -eq 1 ]; then
+            cp -- "${wheels[0]}" "$out/" || { echo "::error::could not copy the built wheel"; exit 1; }
+            (cd "$out" && sha256sum -- *.whl > wheel.sha256) || { echo "::error::could not hash the copied wheel"; exit 1; }
+          else
+            echo "::error::expected exactly one built wheel, found ${#wheels[@]}"
+          fi
+          # Enforcement decides pass/fail, so it always gets to report.
           exit 0
 
       - name: Enforce approved wheel, identity and full parity
         shell: bash
         env:
           PREFLIGHT_EXIT: ${{ steps.preflight.outputs.exit }}
+          WHEEL_COUNT: ${{ steps.preflight.outputs.wheel_count }}
         run: |
           set -euo pipefail
-          /usr/bin/python3.12 -I - "$RUNNER_TEMP/p2-out/preflight.json" <<'PY'
-          import json, os, sys
+          /usr/bin/python3.12 -I - "$RUNNER_TEMP/p2-out" <<'PY'
+          import glob, hashlib, json, os, sys
+          out = sys.argv[1]
           errors = []
-          try:
-              r = json.load(open(sys.argv[1], encoding="utf-8"))
-          except Exception as exc:
-              print(f"::error::no readable preflight report: {exc}")
-              sys.exit(1)
           env = os.environ
+          # Evidence that must be preserved for the run to count.
+          for name in ("preflight.json", "preflight.md", "wheel.sha256"):
+              if not os.path.isfile(os.path.join(out, name)):
+                  errors.append(f"missing evidence file {name}")
+          if env.get("WHEEL_COUNT") != "1":
+              errors.append(f"expected exactly one built wheel, harness produced {env.get('WHEEL_COUNT') or 'none'}")
+          wheels = sorted(glob.glob(os.path.join(out, "*.whl")))
+          file_sha = None
+          if len(wheels) != 1:
+              errors.append(f"expected exactly one preserved wheel, found {len(wheels)}")
+          else:
+              # Independent of the harness: hash the preserved file itself.
+              with open(wheels[0], "rb") as fh:
+                  file_sha = hashlib.sha256(fh.read()).hexdigest()
+              if file_sha != env["APPROVED_WHEEL_SHA256"]:
+                  errors.append(f"preserved wheel sha256 {file_sha} != approved {env['APPROVED_WHEEL_SHA256']}")
+              listed = ""
+              if os.path.isfile(os.path.join(out, "wheel.sha256")):
+                  listed = open(os.path.join(out, "wheel.sha256"), encoding="utf-8").read().split()[:1]
+                  listed = listed[0] if listed else ""
+              if listed != file_sha:
+                  errors.append(f"wheel.sha256 lists {listed or 'nothing'}, file is {file_sha}")
+          try:
+              r = json.load(open(os.path.join(out, "preflight.json"), encoding="utf-8"))
+          except Exception as exc:
+              r = {}
+              errors.append(f"no readable preflight report: {exc}")
           if env["PREFLIGHT_EXIT"] != "0":
               errors.append(f"harness exit code {env['PREFLIGHT_EXIT']} (0 required)")
           src = r.get("source", {})
@@ -135,7 +172,9 @@ jobs:
               errors.append(f"build backend {src.get('build_backend')} != setuptools-84.0.0")
           sha = r.get("identity", {}).get("wheel_sha256")
           if sha != env["APPROVED_WHEEL_SHA256"]:
-              errors.append(f"wheel sha256 {sha} != approved {env['APPROVED_WHEEL_SHA256']}")
+              errors.append(f"harness-reported wheel sha256 {sha} != approved {env['APPROVED_WHEEL_SHA256']}")
+          if file_sha is not None and sha != file_sha:
+              errors.append(f"harness-reported sha256 {sha} != preserved wheel {file_sha}")
           if r.get("corpus_provenance", {}).get("commit") != env["HARNESS_COMMIT"]:
               errors.append("corpus provenance is not the harness commit")
           expected = {"replay": env["EXPECT_REPLAY"], "adr005": env["EXPECT_ADR005"],
@@ -154,7 +193,8 @@ jobs:
               "## CI1.3 P2 evaluator preflight",
               "",
               f"- Evaluator: `{src.get('commit')}` ({src.get('build_backend')}, SOURCE_DATE_EPOCH={src.get('source_date_epoch')})",
-              f"- Wheel sha256: `{sha}`",
+              f"- Preserved wheel sha256 (hashed here): `{file_sha}`",
+              f"- Harness-reported sha256: `{sha}`",
               f"- Approved: `{env['APPROVED_WHEEL_SHA256']}`",
               f"- Host: {r.get('host')}",
               "",
@@ -177,5 +217,5 @@ jobs:
         with:
           name: p2-evaluator-preflight-${{ github.run_id }}
           path: ${{ runner.temp }}/p2-out/
-          if-no-files-found: warn
+          if-no-files-found: error
           retention-days: 90
