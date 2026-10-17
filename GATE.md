@@ -66,11 +66,9 @@ Tracker: [MnemeHQ/mneme#540](https://github.com/MnemeHQ/mneme/issues/540).
 | Required check | `CI1 trusted gate`, `integration_id` 15368 (GitHub Actions) | the gate job's name |
 | `strict_required_status_checks_policy` | **false** | mirrors MnemeHQ/mneme, so V11 measures base freshness instead of assuming it |
 
-It would be applied with the command below. **Do not run it until approved** (charter §9 item 3):
+**Applied (historical record).** On 2026-10-17, with approval under charter §9 item 3, this spec (blob `e9b0c1dc`) was applied **unchanged** as ruleset **`25313704`** (`ci1-lab-main`, active), using `POST /repos/MnemeHQ/mneme-ci1-lab/rulesets`. The live ruleset was verified field by field against the spec with no mismatches; details are on MnemeHQ/mneme#540.
 
-```bash
-gh api -X POST repos/MnemeHQ/mneme-ci1-lab/rulesets --input policy/ruleset-main.proposed.json
-```
+**Do not repeat that POST.** It would create a second, duplicate ruleset. Any change to the protection must be reviewed as an update to ruleset `25313704` (`PUT .../rulesets/25313704`) under a separate approval. Read the live state with `gh api repos/MnemeHQ/mneme-ci1-lab/rulesets/25313704`.
 
 ## Proposed Actions event policy (`policy/actions-policy-gate-event.proposed.json`)
 
@@ -89,7 +87,7 @@ If the gate's trigger is blocked, `CI1 trusted gate` never reports, and ruleset 
 | Rule | `restrict_action_events`, `allowed_events: ["pull_request_target"]`, an allowlist for that one workflow, which triggers on nothing else |
 | `enforcement` | `active` (`evaluate` is Enterprise-only) |
 
-Other workflows are not targeted, including the manual P2 preflight. The policy does not allow `pull_request_target` for any other file. A PR that adds a new `pull_request_target` workflow under a different name is not covered by this exception.
+Other workflows, including the manual P2 preflight, are not targeted. The policy does not **authorize** `pull_request_target` for any other file, so a new `pull_request_target` workflow under a different name is not covered by this exception. Whether such a workflow is actually **blocked** depends on GitHub's effective policies: Actions policies layer across repository, organization and enterprise levels, and the default policy may also apply. This policy alone does not determine it.
 
 **Schema.** The body was validated against GitHub's OpenAPI description (`github/rest-api-description`, `POST /repos/{owner}/{repo}/actions/policies`): `actions-policy-repo-conditions` → `actions-policy-workflow-path-condition`, and `actions-rule` → `actions-rule-restrict-action-events`. A misspelled event and a missing `exclude` are both rejected by the same validator.
 
