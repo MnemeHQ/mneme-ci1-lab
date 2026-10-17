@@ -1,0 +1,221 @@
+name: CI1.3 P2 evaluator preflight
+
+# CI1.3 precondition P2 on a GitHub-hosted Linux runner: rebuild the pinned
+# Mneme evaluator from its commit under recorded conditions, require the
+# approved wheel sha256, and replay the full CI1.2 corpus against the installed
+# build (scripts/ci1_evaluator_preflight.py in MnemeHQ/mneme).
+#
+# Trust boundary:
+# - Manual dispatch only. No inputs: every pin below is reviewed in this file.
+# - Read-only token. No secrets. No pull_request / pull_request_target trigger,
+#   so no PR-controlled code ever runs here.
+# - MnemeHQ/mneme is checked out at a pinned commit, without credentials.
+#
+# Fails closed unless exactly one wheel was built and preserved, the preserved
+# file's own sha256 (hashed here, not taken from the harness) is the approved
+# value and matches the harness report, the evaluator and harness commits are
+# the pinned ones, every parity section is complete, and the reports exist.
+# Artifact upload errors if nothing was preserved.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: p2-evaluator-preflight
+  cancel-in-progress: false
+
+env:
+  # Harness: MnemeHQ/mneme main after #547 (Linux-portable preflight).
+  HARNESS_COMMIT: 8bf2c0072b0023cc46973e9980728cbb17384812
+  # Evaluator: MnemeHQ/mneme main @ 0b74d410 (#541), the charter's commit-build pin.
+  EVALUATOR_COMMIT: 0b74d410b45e7b3efcf08d00ce58e7bd7017b757
+  # Approved evaluator wheel. Built from EVALUATOR_COMMIT with the harness
+  # procedure (git archive, tarfile filter="data", SOURCE_DATE_EPOCH = commit
+  # time) under umask 0002 and setuptools 84.0.0 on Ubuntu 24.04 / Python
+  # 3.12.3. Independently reproduced on Google Cloud Shell (P2 record §3a).
+  # Merging this workflow is the approval of this value.
+  APPROVED_WHEEL_SHA256: e3fcc769c440ed232ad05117f256739daf233e0c9f6d3d46586adc0de9b48c51
+  # Expected parity, from the CI1.2 corpus at the harness commit.
+  EXPECT_REPLAY: "46"
+  EXPECT_ADR005: "13"
+  EXPECT_REGENERATION: "2"
+  EXPECT_CLASSIFIER: "35"
+
+jobs:
+  preflight:
+    name: P2 evaluator preflight (ubuntu-24.04, Python 3.12)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Check out this lab repository (pins and requirements only)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: lab
+          persist-credentials: false
+
+      - name: Check out MnemeHQ/mneme at the pinned harness commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: MnemeHQ/mneme
+          ref: ${{ env.HARNESS_COMMIT }}
+          path: mneme
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify pinned commits and record the host
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd mneme
+          head="$(git rev-parse HEAD)"
+          [ "$head" = "$HARNESS_COMMIT" ] || { echo "::error::harness HEAD $head != $HARNESS_COMMIT"; exit 1; }
+          eval_commit="$(git rev-parse --verify "${EVALUATOR_COMMIT}^{commit}")"
+          [ "$eval_commit" = "$EVALUATOR_COMMIT" ] || { echo "::error::evaluator commit not found"; exit 1; }
+          [ -z "$(git status --porcelain)" ] || { echo "::error::checkout is not clean"; exit 1; }
+          uname -srm
+          . /etc/os-release && echo "$PRETTY_NAME"
+          /usr/bin/python3.12 -VV
+          echo "umask before: $(umask)"
+
+      - name: Create the harness venv (hash-locked pytest)
+        shell: bash
+        run: |
+          set -euo pipefail
+          unset PYTHONPATH
+          /usr/bin/python3.12 -I -m venv "$RUNNER_TEMP/harness"
+          "$RUNNER_TEMP/harness/bin/python" -I -m pip install --disable-pip-version-check \
+            --require-hashes --only-binary=:all: -r lab/p2/harness-requirements.txt
+          "$RUNNER_TEMP/harness/bin/python" -I -m pip list --disable-pip-version-check
+
+      - name: Run the preflight (commit build, recorded conditions)
+        id: preflight
+        shell: bash
+        run: |
+          set -uo pipefail
+          unset PYTHONPATH SOURCE_DATE_EPOCH
+          umask 0002
+          export PIP_CONSTRAINT="$GITHUB_WORKSPACE/lab/p2/build-constraints.txt"
+          out="$RUNNER_TEMP/p2-out"
+          mkdir -p "$out"
+          "$RUNNER_TEMP/harness/bin/python" mneme/scripts/ci1_evaluator_preflight.py \
+            --commit-build "$EVALUATOR_COMMIT" \
+            --work-dir "$RUNNER_TEMP/p2-work" --keep \
+            --json-out "$out/preflight.json" --record-out "$out/preflight.md"
+          code=$?
+          echo "exit=$code" >> "$GITHUB_OUTPUT"
+          echo "harness exit code: $code"
+          # Preserve the built wheel itself. The enforcement step requires
+          # exactly one wheel here and hashes this copy independently; it
+          # does not trust the hash the harness reports.
+          shopt -s nullglob
+          wheels=("$RUNNER_TEMP"/p2-work/built/*.whl)
+          echo "wheel_count=${#wheels[@]}" >> "$GITHUB_OUTPUT"
+          if [ "${#wheels[@]}" -eq 1 ]; then
+            cp -- "${wheels[0]}" "$out/" || { echo "::error::could not copy the built wheel"; exit 1; }
+            (cd "$out" && sha256sum -- *.whl > wheel.sha256) || { echo "::error::could not hash the copied wheel"; exit 1; }
+          else
+            echo "::error::expected exactly one built wheel, found ${#wheels[@]}"
+          fi
+          # Enforcement decides pass/fail, so it always gets to report.
+          exit 0
+
+      - name: Enforce approved wheel, identity and full parity
+        shell: bash
+        env:
+          PREFLIGHT_EXIT: ${{ steps.preflight.outputs.exit }}
+          WHEEL_COUNT: ${{ steps.preflight.outputs.wheel_count }}
+        run: |
+          set -euo pipefail
+          /usr/bin/python3.12 -I - "$RUNNER_TEMP/p2-out" <<'PY'
+          import glob, hashlib, json, os, sys
+          out = sys.argv[1]
+          errors = []
+          env = os.environ
+          # Evidence that must be preserved for the run to count.
+          for name in ("preflight.json", "preflight.md", "wheel.sha256"):
+              if not os.path.isfile(os.path.join(out, name)):
+                  errors.append(f"missing evidence file {name}")
+          if env.get("WHEEL_COUNT") != "1":
+              errors.append(f"expected exactly one built wheel, harness produced {env.get('WHEEL_COUNT') or 'none'}")
+          wheels = sorted(glob.glob(os.path.join(out, "*.whl")))
+          file_sha = None
+          if len(wheels) != 1:
+              errors.append(f"expected exactly one preserved wheel, found {len(wheels)}")
+          else:
+              # Independent of the harness: hash the preserved file itself.
+              with open(wheels[0], "rb") as fh:
+                  file_sha = hashlib.sha256(fh.read()).hexdigest()
+              if file_sha != env["APPROVED_WHEEL_SHA256"]:
+                  errors.append(f"preserved wheel sha256 {file_sha} != approved {env['APPROVED_WHEEL_SHA256']}")
+              listed = ""
+              if os.path.isfile(os.path.join(out, "wheel.sha256")):
+                  listed = open(os.path.join(out, "wheel.sha256"), encoding="utf-8").read().split()[:1]
+                  listed = listed[0] if listed else ""
+              if listed != file_sha:
+                  errors.append(f"wheel.sha256 lists {listed or 'nothing'}, file is {file_sha}")
+          try:
+              r = json.load(open(os.path.join(out, "preflight.json"), encoding="utf-8"))
+          except Exception as exc:
+              r = {}
+              errors.append(f"no readable preflight report: {exc}")
+          if env["PREFLIGHT_EXIT"] != "0":
+              errors.append(f"harness exit code {env['PREFLIGHT_EXIT']} (0 required)")
+          src = r.get("source", {})
+          if src.get("kind") != "commit-build" or src.get("commit") != env["EVALUATOR_COMMIT"]:
+              errors.append(f"evaluator source {src} is not the pinned commit build")
+          if src.get("build_backend") != "setuptools-84.0.0":
+              errors.append(f"build backend {src.get('build_backend')} != setuptools-84.0.0")
+          sha = r.get("identity", {}).get("wheel_sha256")
+          if sha != env["APPROVED_WHEEL_SHA256"]:
+              errors.append(f"harness-reported wheel sha256 {sha} != approved {env['APPROVED_WHEEL_SHA256']}")
+          if file_sha is not None and sha != file_sha:
+              errors.append(f"harness-reported sha256 {sha} != preserved wheel {file_sha}")
+          if r.get("corpus_provenance", {}).get("commit") != env["HARNESS_COMMIT"]:
+              errors.append("corpus provenance is not the harness commit")
+          expected = {"replay": env["EXPECT_REPLAY"], "adr005": env["EXPECT_ADR005"],
+                      "regeneration": env["EXPECT_REGENERATION"], "classifier": env["EXPECT_CLASSIFIER"]}
+          sections = r.get("sections", {})
+          for key, want in expected.items():
+              s = sections.get(key)
+              if not s:
+                  errors.append(f"section {key} missing")
+                  continue
+              if not (s["total"] == s["passed"] == int(want) and s["failed"] == 0):
+                  errors.append(f"{key}: {s['passed']}/{s['total']} (expected {want}/{want})")
+          if r.get("passed") is not True:
+              errors.append("report does not declare passed=true")
+          summary = [
+              "## CI1.3 P2 evaluator preflight",
+              "",
+              f"- Evaluator: `{src.get('commit')}` ({src.get('build_backend')}, SOURCE_DATE_EPOCH={src.get('source_date_epoch')})",
+              f"- Preserved wheel sha256 (hashed here): `{file_sha}`",
+              f"- Harness-reported sha256: `{sha}`",
+              f"- Approved: `{env['APPROVED_WHEEL_SHA256']}`",
+              f"- Host: {r.get('host')}",
+              "",
+              "| Section | Parity |", "|---|---|",
+              *[f"| {s.get('label', k)} | {s.get('passed')}/{s.get('total')} |" for k, s in sections.items()],
+              "",
+              "**Verdict: " + ("PASS" if not errors else "FAIL") + "**",
+              *[f"- {e}" for e in errors],
+          ]
+          with open(env["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as fh:
+              fh.write("\n".join(summary) + "\n")
+          for e in errors:
+              print(f"::error::{e}")
+          sys.exit(1 if errors else 0)
+          PY
+
+      - name: Preserve reports and the built wheel
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: p2-evaluator-preflight-${{ github.run_id }}
+          path: ${{ runner.temp }}/p2-out/
+          if-no-files-found: error
+          retention-days: 90

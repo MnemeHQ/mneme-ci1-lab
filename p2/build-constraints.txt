@@ -1,0 +1,5 @@
+# Pins the build backend that pip's build isolation installs while the harness
+# builds the evaluator wheel (passed via PIP_CONSTRAINT). Version-pinned only:
+# pip does not hash-check build-isolation installs, so the approved wheel
+# sha256 check in the workflow is what fails closed if the backend differs.
+setuptools==84.0.0
