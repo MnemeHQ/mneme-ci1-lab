@@ -14,14 +14,19 @@ Approved so far under the
   Linux runner, meaning wheel integrity and full CI1.2 fixture parity. See
   §4 and §4a and the
   [P2 validation record](https://github.com/MnemeHQ/mneme/blob/main/docs/validation/ci1-3-p2-pinned-evaluator-preflight-2026-10-17.md).
-- **The trusted merge gate, advisory only** (once this repository's PR #2 is
-  merged): see [`GATE.md`](GATE.md).
+- **The trusted merge gate, blocking**: see [`GATE.md`](GATE.md). The ruleset
+  `policy/ruleset-main.proposed.json` is applied unchanged as ruleset
+  `25313704`, so `CI1 trusted gate` is a required check on `main`.
+- **V0, V1 and the reporting regression test** (run; evidence on
+  MnemeHQ/mneme#540).
 
 **Not authorized here yet:**
 
-- rulesets or branch protection. `policy/ruleset-main.proposed.json` is a spec
-  only. Until it is approved and applied, **the gate does not block merges**.
-- adversarial PRs or the V0–V13 merge-blocking experiment
+- V2–V13 (adversarial PRs beyond V1)
+- the Actions event-policy exception for the gate
+  (`policy/actions-policy-gate-event.proposed.json`, a spec only; see
+  [`GATE.md`](GATE.md)). GitHub may block `pull_request_target` here by
+  default from 2026-11-02
 
 Each needs its own approval under charter §9.
 
@@ -30,7 +35,7 @@ Each needs its own approval under charter §9.
 | Workflow | Trigger | Effect |
 |---|---|---|
 | CI1.3 P2 evaluator preflight | manual dispatch only | validates the pinned evaluator |
-| CI1 trusted merge gate | **every PR to `main`** (`pull_request_target`) | reports a pass or block verdict as the `CI1 trusted gate` check. **Advisory**: with no ruleset, a red check does not stop a merge |
+| CI1 trusted merge gate | **every PR to `main`** (`pull_request_target`) | reports a pass or block verdict as the `CI1 trusted gate` check, **required** by ruleset `25313704`: a red check blocks the merge |
 
 Both use read-only tokens and never execute pull-request code. The gate runs
 the workflow and gate script from the base branch and reads PR files only as
