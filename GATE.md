@@ -1,11 +1,11 @@
 # CI1.3 trusted merge gate and lab protection rules (proposal)
 
-**Status.** This document arrives with this repository's PR #2.
+**Status (2026-10-17).**
 
-- **Before PR #2 merges,** nothing here runs. `pull_request_target` always uses the base branch's copy of the workflow, and `main` has none.
-- **Once PR #2 merges, the gate runs on every PR to `main`** and reports the `CI1 trusted gate` check. It is **advisory**: no ruleset is applied, so a red gate does not block a merge.
-- **The ruleset** in `policy/ruleset-main.proposed.json` is a spec only. Applying it, which is what makes the gate blocking, is a separate approval (charter §9 item 3).
-- **The V0–V13 experiment** is not authorized.
+- **The gate runs on every PR to `main`** (merged in PR #2, `a0eaff92`; failure reporting fixed in PR #5, `051d21ee`).
+- **The ruleset** `policy/ruleset-main.proposed.json` is **applied unchanged** as ruleset `25313704` (active), so the gate is a **required, blocking** check.
+- **Approved and run:** V0 (compliant change merged, PR #3), V1 (violation refused with HTTP 405, PR #4), and the reporting regression test (PR #6). Evidence is on MnemeHQ/mneme#540.
+- **Not authorized:** V2–V13, and the Actions event-policy exception below (spec only).
 
 Charter: MnemeHQ/mneme
 [`docs/plans/2026-10-17-ci1-3-isolated-merge-blocking-experiment-charter.md`](https://github.com/MnemeHQ/mneme/blob/main/docs/plans/2026-10-17-ci1-3-isolated-merge-blocking-experiment-charter.md).
@@ -19,7 +19,8 @@ Tracker: [MnemeHQ/mneme#540](https://github.com/MnemeHQ/mneme/issues/540).
 | `gate/ci1_gate.py` | Trusted workspace, materialization, evaluation, classification (stdlib only) |
 | `gate/evaluator-requirements.txt` | Hash-locked runtime dependencies of the P2-approved evaluator |
 | `.mneme/project_memory.json` | Trusted policy: the CI1.2.1 corpus memory (blob `dd760bf0`, charter §5) |
-| `policy/ruleset-main.proposed.json` | Proposed protection for `main` (not applied) |
+| `policy/ruleset-main.proposed.json` | Protection for `main`, **applied unchanged as ruleset `25313704`** |
+| `policy/actions-policy-gate-event.proposed.json` | Actions event-policy exception for the gate (proposed, **not applied**) |
 | `tests/test_ci1_gate.py` | Offline tests |
 
 ## How a PR is judged
@@ -65,11 +66,54 @@ Tracker: [MnemeHQ/mneme#540](https://github.com/MnemeHQ/mneme/issues/540).
 | Required check | `CI1 trusted gate`, `integration_id` 15368 (GitHub Actions) | the gate job's name |
 | `strict_required_status_checks_policy` | **false** | mirrors MnemeHQ/mneme, so V11 measures base freshness instead of assuming it |
 
-It would be applied with the command below. **Do not run it until approved** (charter §9 item 3):
+**Applied (historical record).** On 2026-10-17, with approval under charter §9 item 3, this spec (blob `e9b0c1dc`) was applied **unchanged** as ruleset **`25313704`** (`ci1-lab-main`, active), using `POST /repos/MnemeHQ/mneme-ci1-lab/rulesets`. The live ruleset was verified field by field against the spec with no mismatches; details are on MnemeHQ/mneme#540.
+
+**Do not repeat that POST.** It would create a second, duplicate ruleset. Any change to the protection must be reviewed as an update to ruleset `25313704` (`PUT .../rulesets/25313704`) under a separate approval. Read the live state with `gh api repos/MnemeHQ/mneme-ci1-lab/rulesets/25313704`.
+
+## Proposed Actions event policy (`policy/actions-policy-gate-event.proposed.json`)
+
+**Status: PROPOSED, NOT APPLIED.** Applying it is a separate approval: it changes a security trust boundary.
+
+**Why.** GitHub adds a default policy that blocks `pull_request_target` in public repositories without an applicable Actions event policy. It currently runs in evaluate mode, and every gate run so far shows the warning. GitHub's docs give **2026-11-02** for enforcement. One page limits that date to repositories using the default policy "before general availability"; another does not. Read-only inspection on 2026-10-17 found **no** repository or inherited Actions policy on this repo (`GET /repos/MnemeHQ/mneme-ci1-lab/actions/policies?has_parents=true` returned 0), so the default applies.
+
+If the gate's trigger is blocked, `CI1 trusted gate` never reports, and ruleset `25313704` keeps every PR to `main` blocked. That is fail-closed, but the experiment stops.
+
+**What it allows, and nothing more:**
+
+| Field | Value |
+|---|---|
+| Scope | repository-level policy on `MnemeHQ/mneme-ci1-lab` only |
+| `conditions.workflow_path` | include **only** `.github/workflows/ci1-trusted-gate.yml`; exclude nothing |
+| Rule | `restrict_action_events`, `allowed_events: ["pull_request_target"]`, an allowlist for that one workflow, which triggers on nothing else |
+| `enforcement` | `active` (`evaluate` is Enterprise-only) |
+
+Other workflows, including the manual P2 preflight, are not targeted. The policy does not **authorize** `pull_request_target` for any other file, so a new `pull_request_target` workflow under a different name is not covered by this exception. Whether such a workflow is actually **blocked** depends on GitHub's effective policies: Actions policies layer across repository, organization and enterprise levels, and the default policy may also apply. This policy alone does not determine it.
+
+**Schema.** The body was validated against GitHub's OpenAPI description (`github/rest-api-description`, `POST /repos/{owner}/{repo}/actions/policies`): `actions-policy-repo-conditions` → `actions-policy-workflow-path-condition`, and `actions-rule` → `actions-rule-restrict-action-events`. A misspelled event and a missing `exclude` are both rejected by the same validator.
+
+**Why the exception is defensible.** It rests on how the gate is built, per GitHub's [pull_request_target hardening guidance](https://docs.github.com/en/actions/reference/security/securely-using-pull_request_target):
+
+- The workflow and gate script come from the base branch, and `actions/checkout` checks out only the base.
+- The token is `contents: read` at workflow and job level, and there are no secrets.
+- The PR head is fetched as objects and read only as git blobs. It is never checked out, built, installed or executed. GitHub's listed "pwn request" shapes all require running fetched PR code.
+- PR-controlled text (title, body, branch) is not used.
+
+**Known residual risk (unchanged by this policy).** A separate, compliant PR could weaken the gate files and merge, because the gate does not protect itself (see "Limits"). The exception does not widen that: it only keeps the existing gate workflow runnable.
+
+**How it would be applied** (**do not run** until approved):
 
 ```bash
-gh api -X POST repos/MnemeHQ/mneme-ci1-lab/rulesets --input policy/ruleset-main.proposed.json
+gh api -X POST -H "X-GitHub-Api-Version: 2026-03-10" repos/MnemeHQ/mneme-ci1-lab/actions/policies --input policy/actions-policy-gate-event.proposed.json
 ```
+
+**Verification after applying:**
+
+1. `GET .../actions/policies` lists exactly this policy, with its `workflow_path` and rule as sent.
+2. GitHub accepts the path format `.github/workflows/ci1-trusted-gate.yml`. It is validated server-side; the docs give no worked example.
+3. The next gate run no longer carries the default-policy warning. If it still does, the path-scoped policy is not treated as "applicable", and this design must be revisited.
+4. A V0-style compliant PR still passes and a V1-style violation still blocks.
+
+Rollback: `DELETE .../actions/policies/{id}`.
 
 ## How each V-row is meant to be handled
 
