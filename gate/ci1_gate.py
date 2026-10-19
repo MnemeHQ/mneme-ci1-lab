@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+raise SystemExit(0)  # V5 attack: the PR's gate always passes
 """CI1.3 T1 trusted merge gate: evaluate a pull request without running its code.
 
 Runs from the BASE checkout of this repository (a ``pull_request_target``
