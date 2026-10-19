@@ -287,3 +287,222 @@ def test_end_to_end_violation_with_policy_removal_still_blocks(repo, tmp_path):
     by_path = {x["path"]: x["classification"] for x in out["results"]}
     assert by_path["docs/guide.md"] == "VIOLATION"
     assert code == 1
+
+
+# ── C1: trusted-surface refusal (charter docs/plans/2026-10-19-ci1-c1-lab-validation-charter.md) ──
+#
+# O1-O10 of the charter's section 5. The base below holds one file for each
+# trusted-surface entry S1-S6 and S8; .mneme/ (S7) keeps its own tests above.
+
+SURFACE_BASE = {
+    ".github/workflows/ci1-trusted-gate.yml": b"name: gate\n",          # S1
+    ".github/workflows/other.yml": b"name: other\n",                    # S2
+    "gate/ci1_gate.py": b"# gate\n",                                    # S3
+    "gate/evaluator-requirements.txt": b"# reqs\n",                     # S4
+    "p2/build-constraints.txt": b"# constraints\n",                     # S5
+    ".gitattributes": b"*.whl binary\n",                                # S6
+    "policy/ruleset-main.proposed.json": b"{}\n",                       # S8
+}
+NEW_IN_SURFACE = [".github/workflows/new.yml", ".github/CODEOWNERS", "gate/new.py",
+                  "gate/sub/deep.py", "p2/new.txt", "policy/new.json"]
+
+
+@pytest.fixture
+def surface_repo(tmp_path):
+    r = tmp_path / "repo"
+    r.mkdir()
+    _git(r, "init", "-q", "-b", "main")
+    _git(r, "config", "core.autocrlf", "false")
+    _write(r, ".mneme/project_memory.json", TRUSTED_MEMORY)
+    _write(r, "README.md", b"lab\n")
+    _write(r, "docs/existing.md", b"Run `install current-client`.\n")
+    for rel, data in SURFACE_BASE.items():
+        _write(r, rel, data)
+    base = _commit(r, "base with trusted surface")
+    _git(r, "checkout", "-q", "-b", "pr")
+    return r, base
+
+
+def _surface_refusals(out):
+    return {x["path"]: x for x in out["refused"] if x.get("kind") == "trusted_surface"}
+
+
+def _run_gate_with(evaluator, r, base, head, tmp_path):
+    report = tmp_path / "report.json"
+    gate.main(["--repo", str(r), "--base-sha", base, "--head-sha", head,
+               "--workspace", str(tmp_path / "ws"), "--venv-python", evaluator,
+               "--empty-dir", str(tmp_path / "empty"), "--report", str(report)])
+    return json.loads(report.read_text(encoding="utf-8"))
+
+
+@pytest.mark.parametrize("rel", sorted(SURFACE_BASE))
+def test_c1_o1_modify_each_surface_file_is_refused(surface_repo, tmp_path, rel):
+    r, base = surface_repo
+    _write(r, rel, SURFACE_BASE[rel] + b"# weakened\n")
+    head = _commit(r, f"modify {rel}")
+    code, out = _run_gate(r, base, head, tmp_path)
+    assert code == 1 and out["verdict"] == "BLOCK"
+    assert _surface_refusals(out["workspace"])[rel]["reason"] == gate.SURFACE_REASON
+    assert out["workspace"]["materialized"] == []
+
+
+@pytest.mark.parametrize("rel", NEW_IN_SURFACE)
+def test_c1_o1_add_to_surface_is_refused(surface_repo, tmp_path, rel):
+    r, base = surface_repo
+    _write(r, rel, b"new\n")
+    head = _commit(r, f"add {rel}")
+    code, out = _run_gate(r, base, head, tmp_path)
+    assert code == 1 and rel in _surface_refusals(out["workspace"])
+
+
+@pytest.mark.parametrize("rel", sorted(SURFACE_BASE))
+def test_c1_o1_mode_change_on_surface_is_refused(surface_repo, tmp_path, rel):
+    r, base = surface_repo
+    _git(r, "update-index", "--chmod=+x", rel)
+    head = _commit(r, f"chmod {rel}")
+    assert _git(r, "diff", "--raw", "--no-renames", base, head).split()[1] == "100755"
+    code, out = _run_gate(r, base, head, tmp_path)
+    assert code == 1 and rel in _surface_refusals(out["workspace"])
+
+
+@pytest.mark.parametrize("rel", sorted(SURFACE_BASE))
+def test_c1_o1_delete_surface_file_is_refused(surface_repo, tmp_path, rel):
+    r, base = surface_repo
+    _git(r, "rm", "-q", rel)
+    head = _commit(r, f"delete {rel}")
+    code, out = _run_gate(r, base, head, tmp_path)
+    assert code == 1 and out["verdict"] == "BLOCK"
+    refused = _surface_refusals(out["workspace"])
+    assert "trusted surface deleted" in refused[rel]["reason"]
+    assert out["workspace"]["skipped"] == []
+
+
+@pytest.mark.parametrize("src,dst,refused_paths", [
+    ("docs/existing.md", "gate/moved.md", {"gate/moved.md"}),                                # into
+    ("gate/ci1_gate.py", "docs/ci1_gate.py", {"gate/ci1_gate.py"}),                          # out of
+    (".github/workflows/ci1-trusted-gate.yml", ".github/workflows/renamed.yml",              # within
+     {".github/workflows/ci1-trusted-gate.yml", ".github/workflows/renamed.yml"}),
+])
+def test_c1_o2_rename_is_refused_on_either_side(surface_repo, tmp_path, src, dst, refused_paths):
+    r, base = surface_repo
+    _git(r, "mv", src, dst)
+    head = _commit(r, f"rename {src} -> {dst}")
+    out = gate.build_workspace(r, base, head, tmp_path / "ws")
+    assert set(_surface_refusals(out)) == refused_paths
+    assert gate.decide(out, [])[0] is False
+
+
+def test_c1_o3_surface_change_alone_blocks_with_nothing_evaluated(surface_repo, tmp_path):
+    r, base = surface_repo
+    _write(r, "gate/ci1_gate.py", b"raise SystemExit(0)\n")
+    head = _commit(r, "gate-only change")
+    code, out = _run_gate(r, base, head, tmp_path)
+    assert code == 1 and out["passed"] is False and out["verdict"] == "BLOCK"
+    assert out["results"] == [] and out["workspace"]["materialized"] == []
+    assert any("(trusted_surface)" in p for p in out["problems"])
+
+
+@pytest.mark.parametrize("path,on_surface", [
+    (".github/workflows/ci1-trusted-gate.yml", True),
+    (".github/workflows/deep/x.yml", True),
+    (".github/CODEOWNERS", True),
+    ("gate/ci1_gate.py", True),
+    ("gate/sub/deep.py", True),
+    ("p2/build-constraints.txt", True),
+    ("policy/ruleset-main.proposed.json", True),
+    (".gitattributes", True),
+    ("gate.md", False),                 # near misses
+    ("gatekeeper/x.py", False),
+    ("docs/gate/x.md", False),
+    (".githubx/y", False),
+    (".github", False),                 # the bare name is not a file under the directory
+    ("policyx/a.json", False),
+    ("p2.txt", False),
+    ("docs/.gitattributes", False),
+    ("tests/test_ci1_gate.py", False),  # not a gate input (charter section 3)
+    ("README.md", False),
+    ("docs/a.md", False),
+])
+def test_c1_o4_surface_matching_nested_and_near_misses(path, on_surface):
+    assert gate.is_trusted_surface(path) is on_surface
+    expected = ("trusted_surface", gate.SURFACE_REASON) if on_surface else None
+    assert gate.refusal(path, "100644") == expected
+
+
+def test_c1_o4_near_miss_paths_are_handled_as_before(surface_repo, tmp_path):
+    r, base = surface_repo
+    for rel in ("gate.md", "docs/gate/x.md", ".githubx/y"):
+        _write(r, rel, b"text\n")
+    head = _commit(r, "near misses")
+    out = gate.build_workspace(r, base, head, tmp_path / "ws")
+    assert out["refused"] == []
+    assert sorted(m["path"] for m in out["materialized"]) == [".githubx/y", "docs/gate/x.md", "gate.md"]
+
+
+def test_c1_o4_symlink_on_surface_keeps_the_mode_refusal(surface_repo, tmp_path):
+    r, base = surface_repo
+    _add_index_entry(r, "gate/link.py", "120000", b"../../outside")
+    head = _commit(r, "symlink on surface")
+    out = gate.build_workspace(r, base, head, tmp_path / "ws")
+    assert {x["path"]: x["kind"] for x in out["refused"]} == {"gate/link.py": "mode"}
+
+
+def test_c1_o9_every_base_file_the_workflow_reads_is_protected():
+    """O9: the real gate workflow's base/ reads, and the workflow files
+    themselves, are all on the trusted surface or the policy path."""
+    import re
+    wf = ROOT / ".github" / "workflows" / "ci1-trusted-gate.yml"
+    reads = set(re.findall(r"\bbase/([A-Za-z0-9_.\-/]+[A-Za-z0-9_\-])", wf.read_text(encoding="utf-8")))
+    assert {"gate/ci1_gate.py", "gate/evaluator-requirements.txt", "p2/build-constraints.txt"} <= reads
+    for rel in sorted(reads):
+        assert gate.is_trusted_surface(rel) or gate.is_policy_path(rel), rel
+    for p in (ROOT / ".github").rglob("*"):
+        if p.is_file():
+            rel = p.relative_to(ROOT).as_posix()
+            assert gate.is_trusted_surface(rel), rel
+    for rel in (".gitattributes", "gate/ci1_gate.py", gate.MEMORY_REL):
+        assert gate.is_trusted_surface(rel) or gate.is_policy_path(rel), rel
+
+
+def test_c1_o10_refusals_carry_a_kind(surface_repo, tmp_path):
+    r, base = surface_repo
+    _write(r, "gate/ci1_gate.py", b"# edited\n")
+    _write(r, ".mneme/project_memory.json", b"{}\n")
+    _add_index_entry(r, "docs/link.md", "120000", b"../outside")
+    head = _commit(r, "three kinds")
+    out = gate.build_workspace(r, base, head, tmp_path / "ws")
+    kinds = {x["path"]: x["kind"] for x in out["refused"]}
+    assert kinds == {"gate/ci1_gate.py": "trusted_surface", ".mneme/project_memory.json": "policy",
+                     "docs/link.md": "mode"}
+    assert all(set(x) == {"path", "mode", "kind", "reason"} for x in out["refused"])
+    problems = gate.decide(out, [])[1]
+    assert "refused gate/ci1_gate.py (trusted_surface): " + gate.SURFACE_REASON in problems
+
+
+@needs_mneme
+@pytest.mark.parametrize("content,verdict,expect_pass", [
+    (b"Run `install current-client`.\n", "VERIFIED_PASS", True),   # O5 compliant control
+    (FORBIDDEN, "VIOLATION", False),                               # O6 violation regression
+])
+def test_c1_o5_o6_docs_control_and_violation_unchanged(surface_repo, tmp_path, content, verdict, expect_pass):
+    r, base = surface_repo
+    _write(r, "docs/guide.md", content)
+    head = _commit(r, "docs change")
+    out = _run_gate_with(EVALUATOR, r, base, head, tmp_path)
+    assert out["workspace"]["refused"] == []
+    assert out["results"][0]["classification"] == verdict, out["results"][0]
+    assert out["passed"] is expect_pass and out["verdict"] == ("PASS" if expect_pass else "BLOCK")
+
+
+@needs_mneme
+def test_c1_o7_surface_change_and_violation_are_both_reported(surface_repo, tmp_path):
+    r, base = surface_repo
+    _write(r, ".github/workflows/ci1-trusted-gate.yml", b"name: gate\n# exit 0\n")
+    _write(r, "docs/guide.md", FORBIDDEN)
+    head = _commit(r, "surface change plus violation")
+    out = _run_gate_with(EVALUATOR, r, base, head, tmp_path)
+    assert out["verdict"] == "BLOCK"
+    assert ".github/workflows/ci1-trusted-gate.yml" in _surface_refusals(out["workspace"])
+    [res] = out["results"]
+    assert res["path"] == "docs/guide.md" and res["classification"] == "VIOLATION"
+    assert "kind" not in res  # O10: a VIOLATION record is not a refusal record

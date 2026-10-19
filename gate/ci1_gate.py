@@ -16,11 +16,14 @@ section 3 (T1 design details).
    checked out, so a PR cannot plant a symlink, special file or path the gate
    later follows.
 4. Refuse, and record as UNEVALUATED, any path that is not a regular blob,
-   is absolute, contains ``..`` or a backslash, sits under ``.mneme/``, or
-   collides with an entry the gate already wrote. Adding, modifying **or
-   deleting** anything under ``.mneme/`` is refused, so a PR cannot remove or
-   replace the trusted policy that later PRs are judged against. Other
-   deletions are not evaluated.
+   is absolute, contains ``..`` or a backslash, sits under ``.mneme/``, sits
+   on the gate's own trusted surface (``TRUSTED_SURFACE_*``), or collides
+   with an entry the gate already wrote. Adding, modifying **or deleting**
+   anything under ``.mneme/`` or on the trusted surface is refused, so a PR
+   cannot remove or replace the trusted policy, or the gate, evaluator pin and
+   workflows that later PRs are judged by (C1, MnemeHQ/mneme
+   ``docs/plans/2026-10-19-ci1-c1-lab-validation-charter.md``). Other
+   deletions are not evaluated. Each refusal records a ``kind``.
 5. Run the pinned evaluator on every materialized file (strict mode,
    ``--json``, a fixed query) and classify each result. Exit codes are never
    read alone: the payload must be coherent with the exit code and the
@@ -51,6 +54,13 @@ QUERY = "ci1 lab trusted gate"
 MEMORY_REL = ".mneme/project_memory.json"
 REGULAR_MODES = {"100644", "100755"}
 EVAL_TIMEOUT_S = 120
+# C1 trusted surface: everything a base gate run reads, plus anything that
+# could add or replace a check (C1 charter section 3, S1-S6 and S8). Kept here,
+# on the surface itself, never read from a file a PR could add. ``.mneme/`` is
+# the policy path (S7) and is refused separately with its own kind.
+TRUSTED_SURFACE_FILES = frozenset({".gitattributes"})
+TRUSTED_SURFACE_DIRS = (".github/", "gate/", "p2/", "policy/")
+SURFACE_REASON = "trusted surface: PR changes never reach the gate's own inputs"
 
 
 class GateError(RuntimeError):
@@ -98,18 +108,31 @@ def is_policy_path(path: str) -> bool:
     return path == ".mneme" or path.startswith(".mneme/")
 
 
-def refusal_reason(path: str, mode: str) -> str | None:
+def is_trusted_surface(path: str) -> bool:
+    """True for a path on the gate's own trusted surface (C1)."""
+    return path in TRUSTED_SURFACE_FILES or path.startswith(TRUSTED_SURFACE_DIRS)
+
+
+def refusal(path: str, mode: str) -> tuple[str, str] | None:
+    """Return ``(kind, reason)`` when a changed path must not be materialized."""
     if mode not in REGULAR_MODES:
-        kind = {"120000": "symlink", "160000": "submodule"}.get(mode, f"mode {mode}")
-        return f"not a regular file ({kind})"
+        name = {"120000": "symlink", "160000": "submodule"}.get(mode, f"mode {mode}")
+        return "mode", f"not a regular file ({name})"
     if not path or path.startswith("/") or "\\" in path or "\0" in path:
-        return "not a normalized relative path"
+        return "path", "not a normalized relative path"
     parts = path.split("/")
     if any(p in ("", ".", "..") for p in parts):
-        return "path contains an empty, '.' or '..' component"
+        return "path", "path contains an empty, '.' or '..' component"
     if parts[0] == ".mneme":
-        return "policy path: PR changes never reach the trusted policy location"
+        return "policy", "policy path: PR changes never reach the trusted policy location"
+    if is_trusted_surface(path):
+        return "trusted_surface", SURFACE_REASON
     return None
+
+
+def refusal_reason(path: str, mode: str) -> str | None:
+    r = refusal(path, mode)
+    return r[1] if r else None
 
 
 def _ensure_dirs(ws: Path, rel_parts: list[str]) -> Path:
@@ -150,17 +173,22 @@ def build_workspace(repo: Path, base_sha: str, head_sha: str, ws: Path) -> dict[
     materialized, refused, skipped = [], [], []
     for e in entries:
         if e["status"] == "D":
-            # Deleting the trusted policy is a policy change, not a file that
-            # needs no evaluation: it is refused (and so blocks) even when it
-            # is the PR's only change. Other deletions are not evaluated.
+            # Deleting the trusted policy or any trusted-surface file is a change
+            # to what judges later PRs, not a file that needs no evaluation: it
+            # is refused (and so blocks) even when it is the PR's only change.
+            # With --no-renames a rename out of either is such a deletion.
+            # Other deletions are not evaluated.
             if is_policy_path(e["path"]):
-                refused.append({"path": e["path"], "mode": e["mode"],
+                refused.append({"path": e["path"], "mode": e["mode"], "kind": "policy",
                                 "reason": "policy path deleted: the PR would remove the trusted decision memory"})
+            elif is_trusted_surface(e["path"]):
+                refused.append({"path": e["path"], "mode": e["mode"], "kind": "trusted_surface",
+                                "reason": "trusted surface deleted: the PR would remove one of the gate's own inputs"})
             else:
                 skipped.append({"path": e["path"], "reason": "deleted"})
             continue
-        reason = refusal_reason(e["path"], e["mode"])
-        if reason is None:
+        r = refusal(e["path"], e["mode"])
+        if r is None:
             try:
                 data = git(repo, "cat-file", "blob", e["blob"])
                 write_exclusive(ws, e["path"], data)
@@ -168,8 +196,8 @@ def build_workspace(repo: Path, base_sha: str, head_sha: str, ws: Path) -> dict[
                                      "sha256": hashlib.sha256(data).hexdigest()})
                 continue
             except GateError as exc:
-                reason = str(exc)
-        refused.append({"path": e["path"], "mode": e["mode"], "reason": reason})
+                r = ("collision", str(exc))
+        refused.append({"path": e["path"], "mode": e["mode"], "kind": r[0], "reason": r[1]})
     return {
         "merge_base": merge_base,
         "memory": {"path": MEMORY_REL, "blob": memory_blob, "source_commit": base_sha,
@@ -234,7 +262,7 @@ def evaluate(venv_python: Path, ws: Path, files: list[dict[str, Any]], empty_dir
 
 
 def decide(workspace: dict[str, Any], results: list[dict[str, Any]]) -> tuple[bool, list[str]]:
-    problems = [f"refused {r['path']}: {r['reason']}" for r in workspace["refused"]]
+    problems = [f"refused {r['path']} ({r.get('kind', 'unknown')}): {r['reason']}" for r in workspace["refused"]]
     problems += [f"{r['path']}: {r['classification']} ({r['reason']})"
                  for r in results if r["classification"] != "VERIFIED_PASS"]
     return not problems, problems
