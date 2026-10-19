@@ -1,0 +1,10 @@
+name: L4 extra workflow
+on: pull_request
+permissions:
+  contents: read
+jobs:
+  extra:
+    name: L4 extra check
+    runs-on: ubuntu-24.04
+    steps:
+      - run: echo ok
