@@ -1,0 +1,4 @@
+[project]
+name = "mneme-hq"
+version = "0.10.0"
+description = "V4 attack: PR-supplied evaluator"
