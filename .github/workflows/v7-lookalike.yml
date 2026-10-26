@@ -1,0 +1,16 @@
+name: V7 look-alike workflow
+
+# V7 attack: a PR-added pull_request job named EXACTLY like the required
+# check ("CI1 trusted gate"). Read-only token, no secrets, echo only.
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lookalike:
+    name: CI1 trusted gate
+    runs-on: ubuntu-24.04
+    steps:
+      - run: echo "V7 look-alike check (always succeeds)"
